@@ -1,0 +1,28 @@
+(
+    robot_count: 5,
+    robot_speed: 150.0,
+    collision_radius: 80.0, // Keeping the safe radius
+    state_change_radius: 5.0,   // distance within which robot state can change
+
+    // Battery Settings
+    low_battery_threshold: 30.0,
+    dead_battery_threshold: 5.0,
+    drain_idle: 0.5,   // % per second
+    drain_move: 5.0,   // % per second (Steeper curve)
+    charging_time: 3.0, // time in seconds
+    
+    pickup_stations: [
+        (-300.0, -100.0),
+        (-300.0, 0.0),
+        (-300.0, 100.0),
+    ],
+    dropoff_stations: [
+        (300.0, -100.0),
+        (300.0, 0.0),
+        (300.0, 100.0),
+    ],
+    charger_stations: [
+        (-10.0, -200.0),
+        (70.0, -200.0),
+    ],
+)

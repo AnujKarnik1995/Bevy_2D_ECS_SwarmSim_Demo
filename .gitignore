@@ -1,0 +1,6 @@
+# Rust Build Artifacts (Crucial)
+/target
+
+# OS junk
+.DS_Store
+Thumbs.db
