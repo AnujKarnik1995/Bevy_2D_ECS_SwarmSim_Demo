@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+// use bevy::input::mouse::{MouseMotion, MouseWheel};
+
 use crate::components::*;
 use crate::resources::SimulationConfig;
 use crate::utilityfunctions::*;
@@ -7,7 +9,12 @@ use crate::utilityfunctions::*;
 
 pub fn setup_simulation(mut commands: Commands, config: Res<SimulationConfig>) 
 {
-    commands.spawn(Camera2d);
+    // let center_x = (config.robot_count as f32 * 100.0) / 2.0;
+    // // Camera
+    commands.spawn((
+        Camera2d, 
+        Transform::from_xyz(-30.0, -430.0, 0.0)
+    ));
 
     // Pickups
     for (x, y) in &config.pickup_stations 
@@ -54,7 +61,10 @@ pub fn setup_simulation(mut commands: Commands, config: Res<SimulationConfig>)
             Speed(config.robot_speed),
             TargetPosition(Vec3::ZERO), 
             RobotState::Idle,
-            WorkTimer(Timer::from_seconds(1.0, TimerMode::Once)), 
+            RobotTimers {
+                work: Timer::from_seconds(1.0, TimerMode::Once),
+                charge: Timer::from_seconds(config.charging_time, TimerMode::Once),
+            }, 
             ReservedStation(None),
             Battery(100.0), 
             SavedMemory(None) 
@@ -73,24 +83,32 @@ pub fn movement_system(
     )>
 ) 
 {
-    // 1. Snapshot all obstacles (read-only access)
+    // 1. Snapshot all obstacles
+    // Optimization: explicitly reserve capacity if you know N to avoid re-allocations
+    let obstacle_count = param_set.p0().iter().len();
     let obstacles: Vec<(Entity, Vec3)> = param_set.p0().iter()
         .map(|(e, t)| (e, t.translation))
-        .collect();
+        .collect(); // Note: vectors allocate, doing this every frame is costly for huge N
 
-    // 2. Update robots (mutable access)
+    // 2. Update robots
+    // FIX: Add '_entity' if you aren't using it, but here you ARE using it in calculate_avoidance_force.
+    // If you still get a warning, it means calculate_avoidance_force isn't using the argument.
     for (entity, mut transform, target, speed, state) in param_set.p1().iter_mut() {    
+        
+        // Skip dead robots
         if *state == RobotState::Dead { continue; }
 
-        let should_move = match state {
-            RobotState::MovingToPickup | RobotState::MovingToDropoff | RobotState::MovingToCharger => true,
-            _ => false,
-        };
+        // Filter moving states
+        let should_move = matches!(state, 
+            RobotState::MovingToPickup | 
+            RobotState::MovingToDropoff | 
+            RobotState::MovingToCharger
+        );
         if !should_move { continue; }
 
         let current_pos = transform.translation;
 
-        // collision avoidance
+        // Collision avoidance
         let (separation_vector, critical_overlap) = calculate_avoidance_force(
             entity, 
             current_pos, 
@@ -100,25 +118,39 @@ pub fn movement_system(
 
         // A. Goal Vector
         let target_vec = target.0 - current_pos;
-        let goal_dir = if target_vec.length() > 0.01 { target_vec.normalize() } else { Vec3::ZERO };
+        let dist_to_target = target_vec.length();
+        
+        // Logic Check: Don't normalize if already at target
+        let goal_dir = if dist_to_target > 0.01 { 
+            target_vec.normalize() 
+        } else { 
+            Vec3::ZERO 
+        };
 
         // B. Apply Forces
-        let mut final_direction = Vec3::ZERO;
+        // FIX: Initialize directly from the if/else block to silence the warning
+        let final_direction = if critical_overlap {
+            // Emergency avoidance: Ignore goal, just run away
+            separation_vector
+        } else {
+            // Standard Navigation: Mix goal and avoidance
+            goal_dir + separation_vector
+        };
 
-        if critical_overlap 
-        {
-            // Emergency avoidance only
-            final_direction = separation_vector;
-        } 
-        else 
-        {
-            // Mix goal and avoidance
-            final_direction = goal_dir + separation_vector;
-        }
+        // C. Move
+        // We use length_squared() because it's faster (no square root)
+        if final_direction.length_squared() > 0.0001 {
+            let move_dir = final_direction.normalize();
+            
+            // OPTIONAL: Simple Arrival Logic (Slow down when close)
+            // Prevents the robot from jittering back and forth over the target
+            let current_speed = if dist_to_target < 10.0 {
+                speed.0 * (dist_to_target / 10.0).clamp(0.1, 1.0)
+            } else {
+                speed.0
+            };
 
-        if final_direction.length() > 0.01 
-        {
-            transform.translation += final_direction.normalize() * speed.0 * time.delta_secs();
+            transform.translation += move_dir * speed.0 * time.delta_secs();
         }
     }
 }
@@ -127,7 +159,7 @@ pub fn movement_system(
 pub fn robot_state_machine(
     time: Res<Time>,
     config: Res<SimulationConfig>,
-    mut robot_query: Query<(Entity, &mut RobotState, &mut TargetPosition, &Transform, &mut WorkTimer, &mut ReservedStation, &mut Battery, &mut SavedMemory), With<Robot>>,
+    mut robot_query: Query<(Entity, &mut RobotState, &mut TargetPosition, &Transform, &mut RobotTimers, &mut ReservedStation, &mut Battery, &mut SavedMemory), With<Robot>>,
     mut pickup_query: Query<(Entity, &Transform, &mut Booked), (With<PickupStation>, Without<DropoffStation>, Without<ChargerStation>)>,
     mut dropoff_query: Query<(Entity, &Transform, &mut Booked), (With<DropoffStation>, Without<PickupStation>, Without<ChargerStation>)>,
     mut charger_query: Query<(Entity, &Transform, &mut Booked), (With<ChargerStation>, Without<PickupStation>, Without<DropoffStation>)>
@@ -158,13 +190,13 @@ pub fn robot_state_machine(
                 if transform.translation.distance(target.0) < config.state_change_radius 
                 {
                     *state = RobotState::PickingUp;
-                    timer.0.reset(); 
+                    timer.work.reset(); 
                 }
             }
             RobotState::PickingUp => 
             {
-                timer.0.tick(time.delta());
-                if timer.0.just_finished() 
+                timer.work.tick(time.delta());
+                if timer.work.just_finished() 
                 {
                     if let Some(station_entity) = reserved.0 
                     {
@@ -196,13 +228,13 @@ pub fn robot_state_machine(
                 if transform.translation.distance(target.0) < config.state_change_radius 
                 {
                     *state = RobotState::DroppingOff;
-                    timer.0.reset();
+                    timer.work.reset();
                 }
             }
             RobotState::DroppingOff => 
             {
-                timer.0.tick(time.delta());
-                if timer.0.just_finished() 
+                timer.work.tick(time.delta());
+                if timer.work.just_finished() 
                 {
                     if let Some(station_entity) = reserved.0 
                     {
@@ -238,17 +270,17 @@ pub fn robot_state_machine(
                 if transform.translation.distance(target.0) < config.state_change_radius
                 {
                     *state = RobotState::Charging;
-                    timer.0 = Timer::from_seconds(config.charging_time, TimerMode::Once); 
+                    timer.charge.reset();
                 }
             }
             RobotState::Charging => 
             {
-                timer.0.tick(time.delta());
+                timer.charge.tick(time.delta());
                 
                 battery.0 += 25.0 * time.delta_secs(); 
                 if battery.0 > 100.0 { battery.0 = 100.0; }
 
-                if timer.0.just_finished() 
+                if timer.charge.just_finished() 
                 {
                     // 1. Release the Charger
                     if let Some(station_entity) = reserved.0 
@@ -286,19 +318,16 @@ pub fn robot_state_machine(
 pub fn battery_system(
     time: Res<Time>,
     config: Res<SimulationConfig>,
-    // Note: We need 'reserved' here now to save it
     mut query: Query<(&mut Battery, &mut Sprite, &mut RobotState, &mut SavedMemory, &TargetPosition, &ReservedStation), With<Robot>>
 ) 
 {
     for (mut battery, mut sprite, mut state, mut memory, target, reserved) in &mut query {
         
-        if *state == RobotState::Dead || *state == RobotState::Charging 
-        {
+        if *state == RobotState::Dead || *state == RobotState::Charging {
             continue;
         }
 
-        let is_moving = match *state 
-        {
+        let is_moving = match *state {
             RobotState::MovingToPickup | RobotState::MovingToDropoff | RobotState::MovingToCharger => true,
             _ => false
         };
@@ -306,47 +335,60 @@ pub fn battery_system(
         let drain_rate = if is_moving { config.drain_move } else { config.drain_idle };
         battery.0 -= drain_rate * time.delta_secs();
 
-        // Death
-        if battery.0 < config.dead_battery_threshold 
-        {
+        // Death Check
+        if battery.0 < config.dead_battery_threshold {
             *state = RobotState::Dead;
-            sprite.color = Color::BLACK;
+            sprite.color = Color::BLACK; 
             println!("Robot Died!");
             continue;
         }
 
-        // Low Battery Interrupt
-        let charging_related = match *state 
-        {
+        // Low Battery Check
+        let charging_related = match *state {
             RobotState::WaitingForCharger | RobotState::MovingToCharger | RobotState::Charging => true,
             _ => false
         };
 
-        if battery.0 < config.low_battery_threshold && !charging_related 
-        {
-            // If bots are currently "Working" (PickingUp/DroppingOff), save the "MovingTo" state instead.
-            // This forces the timer to reset cleanly when we return.
-            let resume_state = match *state 
-            {
+        if battery.0 < config.low_battery_threshold && !charging_related {
+            let resume_state = match *state {
                 RobotState::PickingUp => RobotState::MovingToPickup,
                 RobotState::DroppingOff => RobotState::MovingToDropoff,
                 _ => *state,
             };
 
             memory.0 = Some((resume_state, target.0, reserved.0));
-            
             *state = RobotState::WaitingForCharger;
-            println!("Low Battery! Saving task (with key) and finding charger...");
+            println!("Low Battery! Finding charger...");
         }
 
-        // Color Coding
-        if battery.0 > 50.0 
-        {
-            sprite.color = Color::WHITE; // Full
-        } 
-        else 
-        {
-            sprite.color = Color::srgb(1.0, 0.5, 0.0); // Low (Orange)
+        // Color Update
+        if battery.0 > 50.0 {
+            sprite.color = Color::WHITE;
+        } else {
+            sprite.color = Color::srgb(1.0, 0.5, 0.0); // Orange
         }
     }
-}
+} 
+
+// // --- CAMERA CONTROLS ---
+// pub fn camera_controls(
+//     mut motion_events: EventReader<MouseMotion>,
+//     mut scroll_events: EventReader<MouseWheel>,
+//     mouse_buttons: Res<ButtonInput<MouseButton>>,
+//     mut query: Query<(&mut Transform, &mut Projection), With<Camera>>,
+// ) {
+//     if let Ok((mut transform, mut projection)) = query.single_mut() {
+//         if let Projection::Orthographic(ortho) = &mut *projection {
+//             if mouse_buttons.pressed(MouseButton::Right) {
+//                 for ev in motion_events.read() {
+//                     transform.translation.x -= ev.delta.x * ortho.scale;
+//                     transform.translation.y += ev.delta.y * ortho.scale;
+//                 }
+//             }
+
+//             for ev in scroll_events.read() {
+//                 ortho.scale = (ortho.scale - ev.y * 0.1).clamp(0.1, 5.0);
+//             }
+//         }
+//     }
+// }

@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.18.0", features = ["dynamic_linking"]}
+bevy = { version = "0.18.0", features = []}
 ron = "0.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
+
+[features]
+default = []
+visuals = ["bevy/bevy_winit", "bevy/bevy_render", "bevy/bevy_pbr"]
+headless = []
+
+[profile.release]
+debug = true

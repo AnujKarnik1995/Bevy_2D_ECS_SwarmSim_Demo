@@ -36,7 +36,10 @@ pub struct Speed(pub f32);
 pub struct TargetPosition(pub Vec3);
 
 #[derive(Component)]
-pub struct WorkTimer(pub Timer);
+pub struct RobotTimers {
+    pub work: Timer,   // For Picking Up / Dropping Off (1.0s)
+    pub charge: Timer, // For Charging (variable from config)
+}
 
 #[derive(Component)]
 pub struct Booked(pub bool);

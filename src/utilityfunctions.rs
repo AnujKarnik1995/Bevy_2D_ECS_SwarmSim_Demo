@@ -11,15 +11,18 @@ pub fn calculate_avoidance_force(
     let mut separation_vector = Vec3::ZERO;
     let mut critical_overlap = false;
 
-    for (other_entity, other_pos) in obstacles {
+    for (other_entity, other_pos) in obstacles 
+    {
         // Skip self
-        if current_entity == *other_entity {
+        if current_entity == *other_entity 
+        {
             continue;
         }
 
         let distance = current_pos.distance(*other_pos);
 
-        if distance < collision_radius {
+        if distance < collision_radius 
+        {
             let away_direction = (current_pos - *other_pos).normalize();
             // The closer they are, the stronger the force (0.0 to 1.0)
             let strength = 1.0 - (distance / collision_radius);
@@ -38,7 +41,6 @@ pub fn calculate_avoidance_force(
             }
         }
     }
-
     (separation_vector, critical_overlap)
 }
 
